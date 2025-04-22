@@ -1,0 +1,15 @@
+[package]
+name = "r_cryptosys"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+sha2 = "0.10"
+rfd = "0.11"
+tar = "0.4"
+walkdir = "2.3"
+flate2 = "1.0"
+log = "0.4"
+env_logger = "0.10"
+thiserror = "1.0"
