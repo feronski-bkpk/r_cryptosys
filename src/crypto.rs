@@ -68,7 +68,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     outer.finalize().to_vec()
 }
 
-pub fn encrypt(data: &[u8], password: &str) -> Result<Vec<u8>, CryptoError> {
+pub fn encrypt(data: &[u8], password: &str, original_extension: Option<&str>) -> Result<Vec<u8>, CryptoError> {
     debug!("Starting encryption (data len: {})", data.len());
 
     let salt = generate_salt();
@@ -83,17 +83,23 @@ pub fn encrypt(data: &[u8], password: &str) -> Result<Vec<u8>, CryptoError> {
         .map(|(i, &b)| b ^ key[i % KEY_LENGTH])
         .collect();
 
+    // Сохраняем оригинальное расширение (пустую строку, если None)
+    let ext_bytes = original_extension.unwrap_or("").as_bytes();
+    let ext_len = ext_bytes.len() as u8;
+
     let mut result = Vec::with_capacity(SALT_LENGTH + HASH_LENGTH * 2 + encrypted.len());
     result.extend(&salt);
     result.extend(&password_hash);
     result.extend(&data_hash);
+    result.push(ext_len);
+    result.extend(ext_bytes);
     result.extend(encrypted);
 
     info!("Encryption successful (total size: {})", result.len());
     Ok(result)
 }
 
-pub fn decrypt(data: &[u8], password: &str) -> Result<Vec<u8>, CryptoError> {
+pub fn decrypt(data: &[u8], password: &str) -> Result<(Vec<u8>, Option<String>), CryptoError> {
     debug!("Starting decryption (data len: {})", data.len());
 
     if data.len() < SALT_LENGTH + HASH_LENGTH * 2 {
@@ -103,7 +109,21 @@ pub fn decrypt(data: &[u8], password: &str) -> Result<Vec<u8>, CryptoError> {
     let salt = &data[..SALT_LENGTH];
     let stored_pw_hash = &data[SALT_LENGTH..SALT_LENGTH+HASH_LENGTH];
     let stored_data_hash = &data[SALT_LENGTH+HASH_LENGTH..SALT_LENGTH+HASH_LENGTH*2];
-    let encrypted = &data[SALT_LENGTH+HASH_LENGTH*2..];
+    let ext_len = data[SALT_LENGTH+HASH_LENGTH*2] as usize;
+    let ext_start = SALT_LENGTH + HASH_LENGTH*2 + 1;
+    let ext_end = ext_start + ext_len;
+
+    if ext_end > data.len() {
+        return Err(CryptoError::InvalidData);
+    }
+
+    let original_extension = if ext_len > 0 {
+        Some(String::from_utf8(data[ext_start..ext_end].to_vec()).map_err(|_| CryptoError::InvalidData)?)
+    } else {
+        None
+    };
+
+    let encrypted = &data[ext_end..];
 
     let computed_pw_hash = hmac_sha256(password.as_bytes(), salt);
     if computed_pw_hash != stored_pw_hash {
@@ -121,7 +141,7 @@ pub fn decrypt(data: &[u8], password: &str) -> Result<Vec<u8>, CryptoError> {
         return Err(CryptoError::IntegrityCheckFailed);
     }
 
-    Ok(decrypted)
+    Ok((decrypted, original_extension))
 }
 
 pub(crate) fn generate_salt() -> Vec<u8> {

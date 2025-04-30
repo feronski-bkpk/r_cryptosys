@@ -22,28 +22,87 @@ const DECRYPTED_DIR: &str = "decrypted";
 const LOG_FILE: &str = "logs/crypto_system.log";
 
 #[derive(Parser)]
-#[command(version, about)]
+#[command(
+    version,
+    about = "R-Cryptosystem - simple file encryption tool",
+    long_about = r#"
+File and directory encryption tool.
+
+Examples:
+  Basic encryption:      r_cryptosys encrypt file.txt
+  With password:         r_cryptosys encrypt doc.pdf -p 'P@ssw0rd'
+  With new name:         r_cryptosys encrypt data.db -n 'backup'
+  Verbose mode:          r_cryptosys --verbose encrypt archive.zip
+  Directory encryption:  r_cryptosys encrypt ./documents/
+"#
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    #[arg(short, long)]
+    #[arg(
+        short,
+        long,
+        help = "Enable verbose logging",
+        long_help = "Enables detailed logging output for debugging purposes.\nLogs are saved to logs/crypto_system.log"
+    )]
     verbose: bool,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(
+        about = "Encrypt files or directories",
+        long_about = r#"
+Encrypt files or entire directories.
+
+Examples:
+  Encrypt file:          encrypt document.pdf
+  With password:         encrypt data.xlsx -p 'S3cr3t!'
+  With custom name:      encrypt photo.jpg -n 'vacation'
+  Encrypt directory:     encrypt ./project_files/
+"#
+    )]
     Encrypt {
         path: String,
 
-        #[arg(short, long)]
+        #[arg(
+            short,
+            long,
+            help = "Encryption password",
+            long_help = "Specify password for encryption.\nIf not provided, will be prompted interactively."
+        )]
         password: Option<String>,
+
+        #[arg(
+            short,
+            long,
+            help = "New name for encrypted file (without extension)",
+            long_help = "Specify new base name for encrypted file.\nOriginal extension will be preserved automatically."
+        )]
+        name: Option<String>,
     },
 
+    #[command(
+        about = "Decrypt previously encrypted files",
+        long_about = r#"
+Decrypt files encrypted with this tool.
+
+Examples:
+  Basic decryption:      decrypt file.enc
+  With password:         decrypt data.enc -p 'P@ssw0rd'
+  Verbose mode:          r_cryptosys --verbose decrypt backup.enc
+"#
+    )]
     Decrypt {
         path: String,
 
-        #[arg(short, long)]
+        #[arg(
+            short,
+            long,
+            help = "Decryption password",
+            long_help = "Specify password for decryption.\nIf not provided, will be prompted interactively."
+        )]
         password: Option<String>,
     },
 }
@@ -59,7 +118,7 @@ fn main() {
     info!("Запуск приложения (verbose: {})", cli.verbose);
 
     match cli.command {
-        Some(Commands::Encrypt { path, password }) => {
+        Some(Commands::Encrypt { path, password, name }) => {
             info!("CLI: Режим шифрования, путь: {}", path);
             let source_path = Path::new(&path);
 
@@ -92,7 +151,7 @@ fn main() {
             });
 
             info!("Начало шифрования: {}", path);
-            if let Err(e) = encrypt_file(source_path, &password) {
+            if let Err(e) = encrypt_file(source_path, &password, name.as_deref()) {
                 error!("Ошибка шифрования: {}", e);
                 eprintln!("Ошибка шифрования: {}", e);
                 std::process::exit(1);
@@ -183,7 +242,7 @@ fn run() -> Result<(), CryptoError> {
     Ok(())
 }
 
-fn handle_encrypt() -> Result<(), CryptoError> {
+pub fn handle_encrypt() -> Result<(), CryptoError> {
     println!("1. Файл\n2. Директория");
     let choice = read_input("> ");
     let password = read_password("Введите пароль для шифрования: ")?;
@@ -192,7 +251,17 @@ fn handle_encrypt() -> Result<(), CryptoError> {
         "1" => {
             info!("File encryption selected");
             match show_file_dialog_safe(SOURCE_DIR)? {
-                Some(path) => encrypt_file(&path, &password),
+                Some(path) => {
+                    println!("Введите новое имя файла (без расширения, оставьте пустым для сохранения оригинального имени):");
+                    let new_name = read_input("> ");
+                    let new_name = if new_name.trim().is_empty() {
+                        None
+                    } else {
+                        Some(new_name)
+                    };
+
+                    encrypt_file(&path, &password, new_name.as_deref())
+                },
                 None => {
                     info!("File selection cancelled by user");
                     Ok(())
@@ -202,7 +271,17 @@ fn handle_encrypt() -> Result<(), CryptoError> {
         "2" => {
             info!("Directory encryption selected");
             match show_dir_dialog_safe(SOURCE_DIR)? {
-                Some(path) => encrypt_directory(&path, &password),
+                Some(path) => {
+                    println!("Введите новое имя для архива (оставьте пустым для сохранения оригинального имени):");
+                    let new_name = read_input("> ");
+                    let new_name = if new_name.trim().is_empty() {
+                        None
+                    } else {
+                        Some(new_name)
+                    };
+
+                    encrypt_directory(&path, &password, new_name.as_deref())
+                },
                 None => {
                     info!("Directory selection cancelled by user");
                     Ok(())
@@ -237,11 +316,14 @@ fn handle_decrypt() -> Result<(), CryptoError> {
     }
 }
 
-fn encrypt_file(path: &Path, password: &str) -> Result<(), CryptoError> {
+fn encrypt_file(path: &Path, password: &str, new_name: Option<&str>) -> Result<(), CryptoError> {
     info!("Encrypting file: {}", path.display());
     let data = fs::read(path)?;
 
-    let encrypted = match encrypt(&data, password) {
+    let original_extension = path.extension()
+        .and_then(|e| e.to_str());
+
+    let encrypted = match encrypt(&data, password, original_extension) {
         Ok(e) => e,
         Err(e) => {
             error!("Encryption failed for file: {}", path.display());
@@ -249,12 +331,17 @@ fn encrypt_file(path: &Path, password: &str) -> Result<(), CryptoError> {
         }
     };
 
-    let file_name = path.file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| {
-            error!("Invalid file name: {}", path.display());
-            CryptoError::InvalidFileName
-        })?;
+    let file_name = if let Some(name) = new_name {
+        name.to_string()
+    } else {
+        path.file_stem()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                error!("Invalid file name: {}", path.display());
+                CryptoError::InvalidFileName
+            })?
+            .to_string()
+    };
 
     let dest_path = Path::new(ENCRYPTED_DIR).join(format!("{}.enc", file_name));
     fs::write(&dest_path, encrypted)?;
@@ -265,7 +352,7 @@ fn encrypt_file(path: &Path, password: &str) -> Result<(), CryptoError> {
     Ok(())
 }
 
-fn encrypt_directory(path: &Path, password: &str) -> Result<(), CryptoError> {
+fn encrypt_directory(path: &Path, password: &str, new_name: Option<&str>) -> Result<(), CryptoError> {
     info!("Encrypting directory: {}", path.display());
     let archive = match create_archive(path) {
         Ok(a) => a,
@@ -275,7 +362,8 @@ fn encrypt_directory(path: &Path, password: &str) -> Result<(), CryptoError> {
         }
     };
 
-    let encrypted = match encrypt(&archive, password) {
+    // Для директорий не сохраняем расширение
+    let encrypted = match encrypt(&archive, password, None) {
         Ok(e) => e,
         Err(e) => {
             error!("Directory encryption failed: {}", path.display());
@@ -283,12 +371,17 @@ fn encrypt_directory(path: &Path, password: &str) -> Result<(), CryptoError> {
         }
     };
 
-    let dir_name = path.file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| {
-            error!("Invalid directory name: {}", path.display());
-            CryptoError::InvalidFileName
-        })?;
+    let dir_name = if let Some(name) = new_name {
+        name.to_string()
+    } else {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                error!("Invalid directory name: {}", path.display());
+                CryptoError::InvalidFileName
+            })?
+            .to_string()
+    };
 
     let dest_path = Path::new(ENCRYPTED_DIR).join(format!("{}.enc", dir_name));
     fs::write(&dest_path, encrypted)?;
@@ -303,8 +396,8 @@ fn decrypt_file(path: &Path, password: &str) -> Result<(), CryptoError> {
     info!("Decrypting file: {}", path.display());
     let data = fs::read(path)?;
 
-    let decrypted = match decrypt(&data, password) {
-        Ok(d) => d,
+    let (decrypted, original_extension) = match decrypt(&data, password) {
+        Ok((d, ext)) => (d, ext),
         Err(_) => {
             error!("Decryption failed for file: {}", path.display());
             print_error("Ошибка дешифрования: неверный пароль или повреждённый файл");
@@ -312,14 +405,21 @@ fn decrypt_file(path: &Path, password: &str) -> Result<(), CryptoError> {
         }
     };
 
-    let file_stem = path.file_stem()
+    let file_name = path.file_stem()
         .and_then(|s| s.to_str())
         .ok_or_else(|| {
             error!("Invalid file name: {}", path.display());
             CryptoError::InvalidFileName
         })?;
 
-    let dest_path = Path::new(DECRYPTED_DIR).join(file_stem);
+    // Формируем имя файла с оригинальным расширением, если оно есть
+    let dest_path = Path::new(DECRYPTED_DIR).join(
+        if let Some(ext) = original_extension {
+            format!("{}.{}", file_name, ext)
+        } else {
+            file_name.to_string()
+        }
+    );
 
     if dest_path.exists() {
         info!("Target path exists, removing: {}", dest_path.display());
@@ -340,7 +440,7 @@ fn decrypt_file(path: &Path, password: &str) -> Result<(), CryptoError> {
         Ok(_) => {
             info!("File decrypted successfully: {} -> {}",
                 path.display(), dest_path.display());
-            print_success(&format!("Файл '{}' успешно дешифрован", file_stem));
+            print_success(&format!("Файл '{}' успешно дешифрован", file_name));
             Ok(())
         },
         Err(e) => {
