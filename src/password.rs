@@ -1,6 +1,9 @@
 use std::io::{self, Write};
 use crate::error::CryptoError;
 
+#[cfg(unix)]
+extern crate libc;
+
 pub fn read_password(prompt: &str) -> Result<String, CryptoError> {
     print!("{}", prompt);
     io::stdout().flush()?;
