@@ -28,8 +28,8 @@ cargo build --release
 ```
 
 Исполняемый файл будет создан в
--`target/release/r_cryptosys` (Linux)
--`target/release/r_cryptosys.exe` (Windows).
+- `target/release/r_cryptosys` (Linux)
+- `target/release/r_cryptosys.exe` (Windows)
 
 ## Основные команды
 
