@@ -820,7 +820,6 @@ dependencies = [
  "clap",
  "env_logger",
  "flate2",
- "libc",
  "log",
  "rfd",
  "sha2",
