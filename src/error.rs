@@ -40,9 +40,13 @@ pub enum CryptoError {
 
     #[error("Configuration error: {0}")]
     ConfigError(String),
-}
 
-// Остальные реализации From остаются без изменений
+    #[error("Директория не найдена: {0}")]
+    DirectoryNotFound(String),
+
+    #[error("Файл не найден: {0}")]
+    FileNotFound(String),
+}
 
 impl From<walkdir::Error> for CryptoError {
     fn from(err: walkdir::Error) -> Self {

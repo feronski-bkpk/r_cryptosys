@@ -1,66 +1,62 @@
-use log::{Level, LevelFilter, Metadata, Record, SetLoggerError};
-use std::fs::{File, OpenOptions};
+use log::{Log, Metadata, Record};
+use std::sync::Mutex;
+use std::fs::File;
 use std::io::Write;
-use std::path::Path;
-use std::sync::{Mutex, atomic::{AtomicBool, Ordering}};
-
-static VERBOSE_MODE: AtomicBool = AtomicBool::new(false);
+use chrono::Local;
 
 pub struct CryptoLogger {
     log_file: Mutex<File>,
+    verbose: bool,
 }
 
 impl CryptoLogger {
-    pub fn init(verbose: bool, log_path: &str) -> Result<(), SetLoggerError> {
-        // Устанавливаем режим verbose
-        VERBOSE_MODE.store(verbose, Ordering::Relaxed);
-
-        // Создаем директорию для логов если нужно
-        if let Some(parent) = Path::new(log_path).parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
-        let file = OpenOptions::new()
+    pub fn init(verbose: bool, log_path: &str) -> Result<(), log::SetLoggerError> {
+        let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(log_path)
-            .unwrap_or_else(|_| panic!("Не удалось открыть файл логов: {}", log_path));
+            .expect("Не удалось открыть файл логов");
 
         let logger = CryptoLogger {
             log_file: Mutex::new(file),
+            verbose,
         };
 
         log::set_boxed_logger(Box::new(logger))?;
-
-        // Устанавливаем максимальный уровень логирования
         log::set_max_level(if verbose {
-            LevelFilter::Trace
+            log::LevelFilter::Trace
         } else {
-            LevelFilter::Info
+            log::LevelFilter::Info
         });
 
         Ok(())
     }
+
+    fn format_log_line(&self, record: &Record) -> String {
+        format!(
+            "[{}] [{}] {}: {}\n",
+            Local::now().format("%Y-%m-%d %H:%M:%S"),
+            record.level(),
+            record.target(),
+            self.sanitize_message(&format!("{}", record.args()))
+        )
+    }
+
+    fn sanitize_message(&self, msg: &str) -> String {
+        msg.replace("password", "[REDACTED]")
+            .replace("secret", "[REDACTED]")
+            .replace("key", "[REDACTED]")
+    }
 }
 
-impl log::Log for CryptoLogger {
+impl Log for CryptoLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        if VERBOSE_MODE.load(Ordering::Relaxed) {
-            true
-        } else {
-            metadata.level() <= Level::Info
-        }
+        metadata.level() <= log::Level::Info || self.verbose
     }
 
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            let message = sanitize_message(&format!("{}", record.args()));
-            let log_line = format!(
-                "[{}] {}: {}\n",
-                record.level(),
-                record.target(),
-                message
-            );
+            let log_line = self.format_log_line(record);
 
             if let Ok(mut file) = self.log_file.lock() {
                 let _ = file.write_all(log_line.as_bytes());
@@ -73,10 +69,4 @@ impl log::Log for CryptoLogger {
             let _ = file.flush();
         }
     }
-}
-
-fn sanitize_message(msg: &str) -> String {
-    msg.replace("password", "[REDACTED]")
-        .replace("secret", "[REDACTED]")
-        .replace("key", "[REDACTED]")
 }

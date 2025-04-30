@@ -1,13 +1,12 @@
-use log::{debug, error, info, trace, warn};
+use log::{debug, info, trace};
 use sha2::{Sha256, Digest};
 use crate::error::CryptoError;
 
 const PBKDF2_ITERATIONS: u32 = 100_000;
-const KEY_LENGTH: usize = 32; // 256 бит
+const KEY_LENGTH: usize = 32;
 const SALT_LENGTH: usize = 16;
-const HASH_LENGTH: usize = 32; // Для SHA-256
+const HASH_LENGTH: usize = 32;
 
-// Самописный HMAC-SHA256
 pub fn derive_key(password: &str, salt: &[u8]) -> Vec<u8> {
     debug!("Начало генерации ключа (длина пароля: {}, соль: {} байт)",
            password.len(), salt.len());
@@ -26,7 +25,6 @@ pub fn derive_key(password: &str, salt: &[u8]) -> Vec<u8> {
         );
         let mut t = u.clone();
 
-        // Логируем только каждую 1000-ю итерацию
         for iter in 1..PBKDF2_ITERATIONS {
             u = hmac_sha256(password_bytes, &u);
             for (i, byte) in u.iter().enumerate() {
@@ -51,7 +49,6 @@ pub fn derive_key(password: &str, salt: &[u8]) -> Vec<u8> {
 }
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    // Убираем логирование каждого вызова, оставляем только для ошибок
     let mut ipad = vec![0x36; 64];
     let mut opad = vec![0x5C; 64];
 
@@ -108,7 +105,6 @@ pub fn decrypt(data: &[u8], password: &str) -> Result<Vec<u8>, CryptoError> {
     let stored_data_hash = &data[SALT_LENGTH+HASH_LENGTH..SALT_LENGTH+HASH_LENGTH*2];
     let encrypted = &data[SALT_LENGTH+HASH_LENGTH*2..];
 
-    // Проверка пароля
     let computed_pw_hash = hmac_sha256(password.as_bytes(), salt);
     if computed_pw_hash != stored_pw_hash {
         return Err(CryptoError::InvalidPassword);
@@ -120,7 +116,6 @@ pub fn decrypt(data: &[u8], password: &str) -> Result<Vec<u8>, CryptoError> {
         .map(|(i, &b)| b ^ key[i % KEY_LENGTH])
         .collect();
 
-    // Проверка целостности
     let computed_data_hash = Sha256::digest(&decrypted).to_vec();
     if computed_data_hash != stored_data_hash {
         return Err(CryptoError::IntegrityCheckFailed);

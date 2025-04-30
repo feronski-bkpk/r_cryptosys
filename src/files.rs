@@ -12,7 +12,7 @@ pub fn create_archive(src_path: &Path) -> Result<Vec<u8>, CryptoError> {
         let mut builder = Builder::new(enc);
 
         for entry in WalkDir::new(src_path) {
-            let entry = entry?; // Теперь это будет работать
+            let entry = entry?;
             if entry.file_type().is_file() {
                 builder.append_path_with_name(
                     entry.path(),
@@ -36,15 +36,3 @@ pub fn extract_archive(data: &[u8], dest_path: &Path) -> Result<(), CryptoError>
     }
     Ok(())
 }
-
-// pub fn ensure_dir_exists(path: &str) -> io::Result<()> {
-//     if !Path::new(path).exists() {
-//         fs::create_dir_all(path)?;
-//     }
-//     Ok(())
-// }
-
-// pub fn is_likely_archive(data: &[u8]) -> bool {
-//     // Проверка на GZIP архив
-//     data.len() > 2 && data[0] == 0x1F && data[1] == 0x8B
-// }

@@ -3,65 +3,160 @@ mod error;
 mod files;
 mod ui;
 mod logger;
+mod password;
 
 use std::path::Path;
 use std::fs;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use log::{error, info, warn};
 use crate::error::CryptoError;
 use crate::files::{create_archive, extract_archive};
 use crate::ui::*;
 use crate::crypto::{encrypt, decrypt};
 use crate::logger::{CryptoLogger};
+use crate::password::read_password;
 
 const SOURCE_DIR: &str = "source_files";
 const ENCRYPTED_DIR: &str = "encrypted";
 const DECRYPTED_DIR: &str = "decrypted";
-//const LOG_FILE: &str = "crypto_tool.log";
+const LOG_FILE: &str = "logs/crypto_system.log";
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(version, about)]
 struct Cli {
-    /// Включить подробное логирование
-    #[arg(long)]
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    #[arg(short, long)]
     verbose: bool,
 }
 
+#[derive(Subcommand)]
+enum Commands {
+    Encrypt {
+        path: String,
+
+        #[arg(short, long)]
+        password: Option<String>,
+    },
+
+    Decrypt {
+        path: String,
+
+        #[arg(short, long)]
+        password: Option<String>,
+    },
+}
+
 fn main() {
-    // Получаем аргументы командной строки
-    let args: Vec<String> = std::env::args().collect();
+    let cli = Cli::parse();
 
-    // Проверяем 3-й аргумент (индекс 2) на наличие "--verbose"
-    let verbose = args.get(1).map_or(false, |arg| arg == "verbose");
-
-    // Инициализация логгера
-    CryptoLogger::init(verbose, "logs/r_cryptosys.log")
-        .expect("Не удалось инициализировать логгер");
-
-    info!("Starting application (verbose: {})", verbose);
-
-    if let Err(e) = run() {
-        error!("Application error: {}", e);
-        eprintln!("Ошибка: {}", e);
+    if let Err(e) = CryptoLogger::init(cli.verbose, LOG_FILE) {
+        eprintln!("Не удалось инициализировать логгер: {}", e);
+        std::process::exit(1);
     }
 
-    info!("Application shutdown");
+    info!("Запуск приложения (verbose: {})", cli.verbose);
+
+    match cli.command {
+        Some(Commands::Encrypt { path, password }) => {
+            info!("CLI: Режим шифрования, путь: {}", path);
+            let source_path = Path::new(&path);
+
+            #[cfg(windows)]
+            if source_path.is_dir() {
+                error!("Попытка шифрования директории одной командой в Windows: {}", path);
+                eprintln!("На Windows шифрование директорий одной командой не поддерживается. Используйте интерактивную версию");
+                std::process::exit(1);
+            }
+
+            if !source_path.exists() {
+                error!("Файл/директория не найдена: {}", path);
+                eprintln!("Ошибка: файл или директория '{}' не найдена", path);
+                std::process::exit(1);
+            }
+
+            if let Err(e) = init_dirs() {
+                error!("Ошибка инициализации директорий: {}", e);
+                eprintln!("Ошибка: {}", e);
+                std::process::exit(1);
+            }
+
+            let password = password.unwrap_or_else(|| {
+                read_password("Введите пароль для шифрования: ")
+                    .unwrap_or_else(|e| {
+                        error!("Ошибка ввода пароля: {}", e);
+                        eprintln!("Ошибка ввода пароля: {}", e);
+                        std::process::exit(1);
+                    })
+            });
+
+            info!("Начало шифрования: {}", path);
+            if let Err(e) = encrypt_file(source_path, &password) {
+                error!("Ошибка шифрования: {}", e);
+                eprintln!("Ошибка шифрования: {}", e);
+                std::process::exit(1);
+            }
+        },
+        Some(Commands::Decrypt { path, password }) => {
+            info!("CLI: Режим дешифрования, путь: {}", path);
+            let encrypted_path = Path::new(&path);
+
+            if !encrypted_path.exists() {
+                error!("Файл не найден: {}", path);
+                eprintln!("Ошибка: файл '{}' не найден", path);
+                std::process::exit(1);
+            }
+
+            if encrypted_path.extension().and_then(|e| e.to_str()) != Some("enc") {
+                error!("Неверное расширение файла: {}", path);
+                eprintln!("Ошибка: файл должен иметь расширение .enc");
+                std::process::exit(1);
+            }
+
+            if let Err(e) = init_dirs() {
+                error!("Ошибка инициализации директорий: {}", e);
+                eprintln!("Ошибка: {}", e);
+                std::process::exit(1);
+            }
+
+            let password = password.unwrap_or_else(|| {
+                read_password("Введите пароль для дешифрования: ")
+                    .unwrap_or_else(|e| {
+                        error!("Ошибка ввода пароля: {}", e);
+                        eprintln!("Ошибка ввода пароля: {}", e);
+                        std::process::exit(1);
+                    })
+            });
+
+            info!("Начало дешифрования: {}", path);
+            if let Err(e) = decrypt_file(encrypted_path, &password) {
+                error!("Ошибка дешифрования: {}", e);
+                eprintln!("Ошибка дешифрования: {}", e);
+                std::process::exit(1);
+            }
+        },
+        None => {
+            info!("Запуск интерактивного режима");
+
+            if let Err(e) = init_dirs() {
+                error!("Ошибка инициализации директорий: {}", e);
+                eprintln!("Ошибка: {}", e);
+                std::process::exit(1);
+            }
+
+            if let Err(e) = run() {
+                error!("Ошибка в интерактивном режиме: {}", e);
+                eprintln!("Ошибка: {}", e);
+                std::process::exit(1);
+            }
+            info!("Завершение работы интерактивного режима");
+        }
+    }
+    info!("Приложение завершило работу");
 }
 
 fn run() -> Result<(), CryptoError> {
-    // Создаем абсолютные пути
-    let source_dir = std::env::current_dir()?.join(SOURCE_DIR);
-    let encrypted_dir = std::env::current_dir()?.join(ENCRYPTED_DIR);
-    let decrypted_dir = std::env::current_dir()?.join(DECRYPTED_DIR);
-
-    // Создаем директории
-    fs::create_dir_all(&source_dir)?;
-    fs::create_dir_all(&encrypted_dir)?;
-    fs::create_dir_all(&decrypted_dir)?;
-
-    info!("Directories initialized: source={}, encrypted={}, decrypted={}",
-        source_dir.display(), encrypted_dir.display(), decrypted_dir.display());
-
     loop {
         print_menu();
         let choice = read_input("Выберите опцию: ");
@@ -226,7 +321,6 @@ fn decrypt_file(path: &Path, password: &str) -> Result<(), CryptoError> {
 
     let dest_path = Path::new(DECRYPTED_DIR).join(file_stem);
 
-    // Обработка существующего файла/директории
     if dest_path.exists() {
         info!("Target path exists, removing: {}", dest_path.display());
         if dest_path.is_dir() {
@@ -257,11 +351,22 @@ fn decrypt_file(path: &Path, password: &str) -> Result<(), CryptoError> {
     }
 }
 
-fn read_password(prompt: &str) -> Result<String, CryptoError> {
-    use std::io::{self, Write};
-    print!("{}", prompt);
-    io::stdout().flush()?;
-    let mut password = String::new();
-    io::stdin().read_line(&mut password)?;
-    Ok(password.trim().to_string())
+fn init_dirs() -> Result<(), CryptoError> {
+    let dirs = [SOURCE_DIR, ENCRYPTED_DIR, DECRYPTED_DIR];
+    let mut created = false;
+
+    for dir in &dirs {
+        let path = std::env::current_dir()?.join(dir);
+        if !path.exists() {
+            fs::create_dir_all(&path)?;
+            info!("Создана директория: {}", path.display());
+            created = true;
+        }
+    }
+
+    if !created {
+        info!("Все директории уже существуют");
+    }
+
+    Ok(())
 }
