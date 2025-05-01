@@ -1,7 +1,9 @@
-use log::{Log, Metadata, Record};
+use std::fs;
+use log::{Log, Metadata, Record, SetLoggerError};
 use std::sync::Mutex;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::path::Path;
 use chrono::Local;
 
 pub struct CryptoLogger {
@@ -10,12 +12,18 @@ pub struct CryptoLogger {
 }
 
 impl CryptoLogger {
-    pub fn init(verbose: bool, log_path: &str) -> Result<(), log::SetLoggerError> {
-        let file = std::fs::OpenOptions::new()
+    pub fn init(verbose: bool, log_path: &str) -> Result<(), SetLoggerError> {
+        if let Some(log_dir) = Path::new(log_path).parent() {
+            if let Err(e) = fs::create_dir_all(log_dir) {
+                eprintln!("Warning: Failed to create log directory: {}", e);
+            }
+        }
+
+        let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(log_path)
-            .expect("Не удалось открыть файл логов");
+            .expect("Failed to open log file");
 
         let logger = CryptoLogger {
             log_file: Mutex::new(file),

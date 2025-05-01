@@ -83,7 +83,6 @@ pub fn encrypt(data: &[u8], password: &str, original_extension: Option<&str>) ->
         .map(|(i, &b)| b ^ key[i % KEY_LENGTH])
         .collect();
 
-    // Сохраняем оригинальное расширение (пустую строку, если None)
     let ext_bytes = original_extension.unwrap_or("").as_bytes();
     let ext_len = ext_bytes.len() as u8;
 
