@@ -47,6 +47,12 @@ pub enum CryptoError {
 
     #[error("Файл не найден: {0}")]
     FileNotFound(String),
+
+    #[error("Authentication failed")]
+    AuthFailed,
+
+    #[error("UTF-8 conversion error")]
+    Utf8Error(#[from] std::string::FromUtf8Error),
 }
 
 impl From<walkdir::Error> for CryptoError {
