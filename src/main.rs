@@ -344,7 +344,8 @@ fn encrypt_file(path: &Path, password: &str, new_name: Option<&str>) -> Result<(
     };
 
     let dest_path = Path::new(ENCRYPTED_DIR).join(format!("{}.enc", file_name));
-    fs::write(&dest_path, encrypted)?;
+    let (encrypted_data, _) = encrypted;
+    fs::write(&dest_path, encrypted_data)?;
 
     info!("File encrypted successfully: {} -> {}",
         path.display(), dest_path.display());
@@ -384,7 +385,8 @@ fn encrypt_directory(path: &Path, password: &str, new_name: Option<&str>) -> Res
     };
 
     let dest_path = Path::new(ENCRYPTED_DIR).join(format!("{}.enc", dir_name));
-    fs::write(&dest_path, encrypted)?;
+    let (encrypted_data, _) = encrypted;
+    fs::write(&dest_path, encrypted_data)?;
 
     info!("Directory encrypted successfully: {} -> {}",
         path.display(), dest_path.display());
@@ -396,8 +398,8 @@ fn decrypt_file(path: &Path, password: &str) -> Result<(), CryptoError> {
     info!("Decrypting file: {}", path.display());
     let data = fs::read(path)?;
 
-    let (decrypted, original_extension) = match decrypt(&data, password) {
-        Ok((d, ext)) => (d, ext),
+    let (decrypted, original_extension, _) = match decrypt(&data, password) {
+        Ok((d, ext, m)) => (d, ext, m),
         Err(_) => {
             error!("Decryption failed for file: {}", path.display());
             print_error("Ошибка дешифрования: неверный пароль или повреждённый файл");
