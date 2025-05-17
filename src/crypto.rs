@@ -1,4 +1,4 @@
-use log::{debug, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use sha2::{Sha256, Digest};
 use subtle::ConstantTimeEq;
 use std::time::{Instant, Duration};
@@ -52,19 +52,15 @@ static INV_S_BOX: [u8; 256] = [
 
 #[derive(Debug)]
 pub struct CryptoMetrics {
-    pub operation: &'static str,
     pub duration: Duration,
-    pub data_size: usize,
     pub speed_mbps: f64,
 }
 
 impl CryptoMetrics {
-    pub fn new(operation: &'static str, data_size: usize, duration: Duration) -> Self {
+    pub fn new(data_size: usize, duration: Duration) -> Self {
         let speed_mbps = (data_size as f64 * 8.0) / (duration.as_secs_f64() * 1_000_000.0);
         CryptoMetrics {
-            operation,
             duration,
-            data_size,
             speed_mbps,
         }
     }
@@ -73,6 +69,7 @@ impl CryptoMetrics {
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut key_padded = vec![0; 64];
     if key.len() > 64 {
+        trace!("[HMAC] Ключ слишком длинный, хешируем его");
         let hash = Sha256::digest(key);
         key_padded[..hash.len()].copy_from_slice(&hash);
     } else {
@@ -96,24 +93,31 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     outer.update(&opad);
     outer.update(&inner_result);
 
-    outer.finalize().to_vec()
+    let result = outer.finalize().to_vec();
+    result
 }
 
 pub fn derive_key(password: &str, salt: &[u8]) -> Vec<u8> {
-    debug!("[KEY] Начало генерации ключа");
+    info!("[KEY] Начало генерации ключа ({} итераций)", PBKDF2_ITERATIONS);
+    trace!("[KEY] Пароль: {}b, Соль: {:?}", password.len(), salt);
+
     let start_time = Instant::now();
     let password_bytes = password.as_bytes();
     let mut key = Vec::with_capacity(KEY_LENGTH);
     let mut block: i32 = 1;
 
     while key.len() < KEY_LENGTH {
+        trace!("[KEY] Генерация блока {}", block);
         let mut u = hmac_sha256(
             password_bytes,
             &[salt, &block.to_be_bytes()].concat()
         );
         let mut t = u.clone();
 
-        for _ in 1..PBKDF2_ITERATIONS {
+        for iteration in 1..PBKDF2_ITERATIONS {
+            if iteration % 10_000 == 0 {
+                trace!("[KEY] Итерация {}/{}", iteration, PBKDF2_ITERATIONS);
+            }
             u = hmac_sha256(password_bytes, &u);
             for (i, byte) in u.iter().enumerate() {
                 t[i] ^= byte;
@@ -125,29 +129,40 @@ pub fn derive_key(password: &str, salt: &[u8]) -> Vec<u8> {
     }
 
     key.truncate(KEY_LENGTH);
-    debug!("[KEY] Ключ сгенерирован за {:?}", start_time.elapsed());
+    info!(
+        "[KEY] Ключ сгенерирован за {:?} (скорость: {:.2} Мбит/сек)",
+        start_time.elapsed(),
+        (KEY_LENGTH as f64 * 8.0 * PBKDF2_ITERATIONS as f64) / start_time.elapsed().as_secs_f64() / 1_000_000.0
+    );
     key
 }
 
 pub fn encrypt(data: &[u8], password: &str, original_extension: Option<&str>) -> Result<(Vec<u8>, CryptoMetrics), CryptoError> {
     let timer = Instant::now();
-    info!("[ENC] Начало шифрования (данные: {}b, расширение: {:?})", data.len(), original_extension);
+    info!("[ENC] Начало шифрования (данные: {}b)", data.len());
+    trace!("[ENC] Расширение файла: {:?}", original_extension);
 
     let salt = generate_salt();
+    trace!("[ENC] Соль: {:?}", salt);
+
     let iv = generate_salt()[..IV_LENGTH].to_vec();
+    trace!("[ENC] Вектор инициализации: {:?}", iv);
 
     let key = derive_key(password, &salt);
 
     let encrypted = block_encrypt(data, &key, &iv);
+    info!("[ENC] Данные зашифрованы ({} блоков)", encrypted.len() / BLOCK_SIZE);
 
     let mut hmac_data = Vec::new();
     hmac_data.extend(&salt);
     hmac_data.extend(&iv);
     hmac_data.extend(&encrypted);
     let hmac = hmac_sha256(&key, &hmac_data);
+    trace!("[ENC] HMAC вычислен");
 
     let ext_bytes = original_extension.unwrap_or("").as_bytes();
     let ext_len = ext_bytes.len() as u8;
+    trace!("[ENC] Длина расширения: {}", ext_len);
 
     let mut result = Vec::with_capacity(SALT_LENGTH + IV_LENGTH + HASH_LENGTH + 1 + ext_bytes.len() + encrypted.len());
     result.extend(&salt);
@@ -157,10 +172,11 @@ pub fn encrypt(data: &[u8], password: &str, original_extension: Option<&str>) ->
     result.extend(ext_bytes);
     result.extend(&encrypted);
 
-    let metrics = CryptoMetrics::new("encrypt", data.len(), timer.elapsed());
-
-    info!("[ENC] Шифрование завершено за {:?} ({:.2} Мбит/сек)",
-        metrics.duration, metrics.speed_mbps);
+    let metrics = CryptoMetrics::new(data.len(), timer.elapsed());
+    info!(
+        "[ENC] Шифрование завершено за {:?} (скорость: {:.2} Мбит/сек)",
+        metrics.duration, metrics.speed_mbps
+    );
 
     Ok((result, metrics))
 }
@@ -171,11 +187,16 @@ pub fn decrypt(data: &[u8], password: &str) -> Result<(Vec<u8>, Option<String>, 
 
     let min_size = SALT_LENGTH + IV_LENGTH + HASH_LENGTH + 1;
     if data.len() < min_size {
+        error!("[DEC] Недостаточный размер данных ({} < {})", data.len(), min_size);
         return Err(CryptoError::InvalidData);
     }
 
     let salt = &data[..SALT_LENGTH];
+    trace!("[DEC] Соль: {:?}", salt);
+
     let iv = &data[SALT_LENGTH..SALT_LENGTH + IV_LENGTH];
+    trace!("[DEC] Вектор инициализации: {:?}", iv);
+
     let stored_hmac = &data[SALT_LENGTH + IV_LENGTH..SALT_LENGTH + IV_LENGTH + HASH_LENGTH];
     let ext_len = data[SALT_LENGTH + IV_LENGTH + HASH_LENGTH] as usize;
     let ext_start = SALT_LENGTH + IV_LENGTH + HASH_LENGTH + 1;
@@ -183,8 +204,11 @@ pub fn decrypt(data: &[u8], password: &str) -> Result<(Vec<u8>, Option<String>, 
     let encrypted = &data[ext_end..];
 
     if ext_end > data.len() {
+        error!("[DEC] Некорректная длина расширения ({} > {})", ext_end, data.len());
         return Err(CryptoError::InvalidData);
     }
+
+    trace!("[DEC] Длина расширения: {}", ext_len);
 
     let mut hmac_data = Vec::new();
     hmac_data.extend(salt);
@@ -195,38 +219,49 @@ pub fn decrypt(data: &[u8], password: &str) -> Result<(Vec<u8>, Option<String>, 
     let computed_hmac = hmac_sha256(&key, &hmac_data);
 
     if computed_hmac.ct_ne(stored_hmac).unwrap_u8() == 1 {
-        warn!("[DEC] Ошибка аутентификации");
+        warn!("[DEC] Ошибка аутентификации HMAC");
         return Err(CryptoError::AuthFailed);
     }
+    trace!("[DEC] HMAC проверен успешно");
 
     let decrypted = block_decrypt(encrypted, &key, iv)?;
+    info!("[DEC] Данные расшифрованы ({} блоков)", decrypted.len() / BLOCK_SIZE);
 
     let original_extension = if ext_len > 0 {
-        Some(String::from_utf8(data[ext_start..ext_end].to_vec())?)
+        let ext = String::from_utf8(data[ext_start..ext_end].to_vec())?;
+        trace!("[DEC] Расширение файла: {}", ext);
+        Some(ext)
     } else {
         None
     };
 
-    let metrics = CryptoMetrics::new("decrypt", decrypted.len(), timer.elapsed());
-
-    info!("[DEC] Дешифрование завершено за {:?} ({:.2} Мбит/сек)",
-        metrics.duration, metrics.speed_mbps);
+    let metrics = CryptoMetrics::new(decrypted.len(), timer.elapsed());
+    info!(
+        "[DEC] Дешифрование завершено за {:?} (скорость: {:.2} Мбит/сек)",
+        metrics.duration, metrics.speed_mbps
+    );
 
     Ok((decrypted, original_extension, metrics))
 }
 
 fn block_encrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Vec<u8> {
     let timer = Instant::now();
+    trace!("[BLOCK-ENC] Начало шифрования блоков (данные: {}b)", data.len());
+
     let mut encrypted = Vec::with_capacity(data.len() + BLOCK_SIZE);
     let round_keys = expand_key(key, ROUNDS);
+    trace!("[BLOCK-ENC] Ключи раундов сгенерированы");
+
     let mut prev_block = iv.to_vec();
     let block_count = data.chunks(BLOCK_SIZE).count();
+    trace!("[BLOCK-ENC] Всего блоков: {}", block_count);
 
     for chunk in data.chunks(BLOCK_SIZE) {
         let mut block = chunk.to_vec();
 
         if block.len() < BLOCK_SIZE {
             let pad_len = BLOCK_SIZE - block.len();
+            trace!("[BLOCK-ENC] Добавление padding ({} байт)", pad_len);
             block.extend(std::iter::repeat(pad_len as u8).take(pad_len));
         }
 
@@ -272,24 +307,32 @@ fn block_encrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Vec<u8> {
         encrypted.extend(block);
     }
 
-    debug!("[BLOCK-ENC] {} blocks in {:?} ({:.2} MB/s)",
+    info!(
+        "[BLOCK-ENC] Завершено: {} блоков за {:?} ({:.2} Мбит/сек)",
         block_count,
         timer.elapsed(),
-        (data.len() as f64 / timer.elapsed().as_secs_f64()) / 1_000_000.0);
+        (data.len() as f64 * 8.0 / timer.elapsed().as_secs_f64()) / 1_000_000.0
+    );
 
     encrypted
 }
 
 fn block_decrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let timer = Instant::now();
+    trace!("[BLOCK-DEC] Начало дешифрования блоков (данные: {}b)", data.len());
+
     if data.len() % BLOCK_SIZE != 0 {
+        error!("[BLOCK-DEC] Некорректный размер данных ({} не кратно {})", data.len(), BLOCK_SIZE);
         return Err(CryptoError::InvalidData);
     }
 
     let mut decrypted = Vec::with_capacity(data.len());
     let round_keys = expand_key(key, ROUNDS);
+    trace!("[BLOCK-DEC] Ключи раундов сгенерированы");
+
     let mut prev_block = iv.to_vec();
     let block_count = data.len() / BLOCK_SIZE;
+    trace!("[BLOCK-DEC] Всего блоков: {}", block_count);
 
     for chunk in data.chunks(BLOCK_SIZE) {
         let mut block = chunk.to_vec();
@@ -335,20 +378,25 @@ fn block_decrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoEr
     }
 
     remove_padding(&mut decrypted)?;
+    trace!("[BLOCK-DEC] Padding удален");
 
-    debug!("[BLOCK-DEC] {} blocks in {:?} ({:.2} MB/s)",
+    debug!(
+        "[BLOCK-DEC] Завершено: {} блоков за {:?} ({:.2} Мбит/сек)",
         block_count,
         timer.elapsed(),
-        (data.len() as f64 / timer.elapsed().as_secs_f64()) / 1_000_000.0);
+        (data.len() as f64 * 8.0 / timer.elapsed().as_secs_f64()) / 1_000_000.0
+    );
 
     Ok(decrypted)
 }
 
 fn expand_key(key: &[u8], rounds: usize) -> Vec<Vec<u8>> {
+    trace!("[KEY-EXP] Расширение ключа ({} раундов)", rounds);
     let mut round_keys = Vec::with_capacity(rounds);
     let mut current_key = key.to_vec();
 
     for round in 0..rounds {
+        trace!("[KEY-EXP] Генерация ключа для раунда {}", round);
         let mut new_key = current_key.clone();
 
         for (i, byte) in new_key.iter_mut().enumerate() {
@@ -363,24 +411,32 @@ fn expand_key(key: &[u8], rounds: usize) -> Vec<Vec<u8>> {
         current_key = new_key;
     }
 
+    trace!("[KEY-EXP] Ключи раундов сгенерированы");
     round_keys
 }
 
 fn remove_padding(data: &mut Vec<u8>) -> Result<(), CryptoError> {
+    trace!("[PAD] Проверка padding");
     if data.is_empty() {
+        error!("[PAD] Пустые данные");
         return Err(CryptoError::AuthFailed);
     }
 
     let pad_len = *data.last().unwrap() as usize;
+    trace!("[PAD] Длина padding: {}", pad_len);
+
     if pad_len == 0 || pad_len > BLOCK_SIZE {
+        error!("[PAD] Некорректная длина padding");
         return Err(CryptoError::AuthFailed);
     }
 
     if data.len() < pad_len {
+        error!("[PAD] Данные короче указанного padding");
         return Err(CryptoError::AuthFailed);
     }
 
     if !data[data.len()-pad_len..].iter().all(|&b| b == pad_len as u8) {
+        error!("[PAD] Неверные байты padding");
         return Err(CryptoError::AuthFailed);
     }
 
@@ -402,5 +458,6 @@ pub(crate) fn generate_salt() -> Vec<u8> {
         *byte = ((time >> shift) & 0xFF) as u8;
     }
 
+    trace!("[SALT] Сгенерирована соль: {:?}", salt);
     salt
 }

@@ -122,13 +122,6 @@ fn main() {
             info!("CLI: Режим шифрования, путь: {}", path);
             let source_path = Path::new(&path);
 
-            #[cfg(windows)]
-            if source_path.is_dir() {
-                error!("Попытка шифрования директории одной командой в Windows: {}", path);
-                eprintln!("На Windows шифрование директорий одной командой не поддерживается. Используйте интерактивную версию");
-                std::process::exit(1);
-            }
-
             if !source_path.exists() {
                 error!("Файл/директория не найдена: {}", path);
                 eprintln!("Ошибка: файл или директория '{}' не найдена", path);

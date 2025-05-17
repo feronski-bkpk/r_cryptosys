@@ -55,6 +55,23 @@ impl CryptoLogger {
             .replace("secret", "[REDACTED]")
             .replace("key", "[REDACTED]")
     }
+
+    //use regex::Regex;
+    //
+    // fn sanitize_message(&self, msg: &str) -> String {
+    //     let path_regex = Regex::new(r"(?i)([a-z]:\\[^\s]+|\\{2}[^\s]+|\/[^\s]+)").unwrap();
+    //     let msg_no_paths = path_regex.replace_all(msg, "[REDACTED_PATH]");
+    //
+    //     let file_regex = Regex::new(r"[\w\-]+\.\w{2,10}").unwrap();
+    //     let msg_no_files = file_regex.replace_all(&msg_no_paths, "[REDACTED_FILE]");
+    //
+    //     msg_no_files
+    //         .replace("password", "[REDACTED]")
+    //         .replace("secret", "[REDACTED]")
+    //         .replace("key", "[REDACTED]")
+    //         .replace("b]", "]")
+    //         .to_string()
+    // }
 }
 
 impl Log for CryptoLogger {
