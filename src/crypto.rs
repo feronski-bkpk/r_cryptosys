@@ -1,4 +1,4 @@
-use log::{debug, error, info, trace, warn};
+use log::{error, info, trace, warn};
 use sha2::{Sha256, Digest};
 use subtle::ConstantTimeEq;
 use std::time::{Instant, Duration};
@@ -244,82 +244,126 @@ pub fn decrypt(data: &[u8], password: &str) -> Result<(Vec<u8>, Option<String>, 
     Ok((decrypted, original_extension, metrics))
 }
 
+const ROTATE_LEFT_SHIFT: usize = BLOCK_SIZE / 2;
+const ROTATE_RIGHT_SHIFT: usize = BLOCK_SIZE / 2;
+const ROTATE_LEFT_SHIFT2: usize = BLOCK_SIZE / 3;
+const ROTATE_RIGHT_SHIFT2: usize = BLOCK_SIZE / 3;
+
+#[inline(always)]
+fn apply_sbox(block: &mut [u8; BLOCK_SIZE], sbox: &[u8; 256]) {
+    if BLOCK_SIZE <= 16 {
+        for i in 0..BLOCK_SIZE {
+            block[i] = sbox[block[i] as usize];
+        }
+    } else {
+        for byte in block.iter_mut() {
+            *byte = sbox[*byte as usize];
+        }
+    }
+}
+
 fn block_encrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Vec<u8> {
+    let block_count = data.chunks(BLOCK_SIZE).count();
     let timer = Instant::now();
     trace!("[BLOCK-ENC] Начало шифрования блоков (данные: {}b)", data.len());
+    trace!("[BLOCK-ENC] Всего блоков: {}", block_count);
 
     let mut encrypted = Vec::with_capacity(data.len() + BLOCK_SIZE);
     let round_keys = expand_key(key, ROUNDS);
     trace!("[BLOCK-ENC] Ключи раундов сгенерированы");
+    let sbox = &SUBSTITUTION_BOX;
 
-    let mut prev_block = iv.to_vec();
-    let block_count = data.chunks(BLOCK_SIZE).count();
-    trace!("[BLOCK-ENC] Всего блоков: {}", block_count);
+    let mut prev_block = [0u8; BLOCK_SIZE];
+    prev_block.copy_from_slice(&iv[..BLOCK_SIZE.min(iv.len())]);
 
-    for chunk in data.chunks(BLOCK_SIZE) {
-        let mut block = chunk.to_vec();
+    for chunk in data.chunks_exact(BLOCK_SIZE) {
+        let mut block = [0u8; BLOCK_SIZE];
+        block.copy_from_slice(chunk);
 
-        if block.len() < BLOCK_SIZE {
-            let pad_len = BLOCK_SIZE - block.len();
-            trace!("[BLOCK-ENC] Добавление padding ({} байт)", pad_len);
-            block.extend(std::iter::repeat(pad_len as u8).take(pad_len));
-        }
-
-        for (i, byte) in block.iter_mut().enumerate() {
-            *byte ^= prev_block[i % BLOCK_SIZE];
+        for i in 0..BLOCK_SIZE {
+            block[i] ^= prev_block[i];
         }
 
         for round_key in &round_keys {
-            for byte in &mut block {
-                *byte = SUBSTITUTION_BOX[*byte as usize];
+            apply_sbox(&mut block, sbox);
+            block.rotate_left(ROTATE_LEFT_SHIFT);
+
+            for i in 0..BLOCK_SIZE {
+                let j = (i * 11 + 3) % BLOCK_SIZE;
+                block[i] = block[i].wrapping_add(block[j]).rotate_left(3);
             }
 
-            if !block.is_empty() {
-                let shift = block.len() / 2;
-                block.rotate_left(shift);
-
-                for i in 0..block.len() {
-                    let j = (i * 11 + 3) % block.len();
-                    block[i] = block[i].wrapping_add(block[j]).rotate_left(3);
-                }
+            let rk_len = round_key.len();
+            for i in 0..BLOCK_SIZE {
+                block[i] ^= round_key[i % rk_len];
             }
 
-            for (i, byte) in block.iter_mut().enumerate() {
-                *byte ^= round_key[i % round_key.len()];
-            }
+            apply_sbox(&mut block, sbox);
+            block.rotate_left(ROTATE_LEFT_SHIFT2);
 
-            for byte in &mut block {
-                *byte = SUBSTITUTION_BOX[*byte as usize];
-            }
-
-            if !block.is_empty() {
-                let shift = block.len() / 3;
-                block.rotate_left(shift);
-
-                for i in 0..block.len() {
-                    let j = (i * 7 + 1) % block.len();
-                    block[i] ^= block[j].rotate_left(5);
-                }
+            for i in 0..BLOCK_SIZE {
+                let j = (i * 7 + 1) % BLOCK_SIZE;
+                block[i] ^= block[j].rotate_left(5);
             }
         }
 
-        prev_block = block.clone();
-        encrypted.extend(block);
+        prev_block = block;
+        encrypted.extend_from_slice(&block);
     }
+
+    let rem = data.chunks_exact(BLOCK_SIZE).remainder();
+    if !rem.is_empty() {
+        let mut block = [0u8; BLOCK_SIZE];
+        let pad_len = BLOCK_SIZE - rem.len();
+        block[..rem.len()].copy_from_slice(rem);
+        block[rem.len()..].fill(pad_len as u8);
+
+        for i in 0..BLOCK_SIZE {
+            block[i] ^= prev_block[i];
+        }
+
+        for round_key in &round_keys {
+            apply_sbox(&mut block, sbox);
+            block.rotate_left(ROTATE_LEFT_SHIFT);
+
+            for i in 0..BLOCK_SIZE {
+                let j = (i * 11 + 3) % BLOCK_SIZE;
+                block[i] = block[i].wrapping_add(block[j]).rotate_left(3);
+            }
+
+            let rk_len = round_key.len();
+            for i in 0..BLOCK_SIZE {
+                block[i] ^= round_key[i % rk_len];
+            }
+
+            apply_sbox(&mut block, sbox);
+            block.rotate_left(ROTATE_LEFT_SHIFT2);
+
+            for i in 0..BLOCK_SIZE {
+                let j = (i * 7 + 1) % BLOCK_SIZE;
+                block[i] ^= block[j].rotate_left(5);
+            }
+        }
+
+        encrypted.extend_from_slice(&block);
+    }
+
+    let end_time = timer.elapsed();
 
     info!(
         "[BLOCK-ENC] Завершено: {} блоков за {:?} ({:.2} Мбит/сек)",
         block_count,
-        timer.elapsed(),
-        (data.len() as f64 * 8.0 / timer.elapsed().as_secs_f64()) / 1_000_000.0
+        end_time,
+        (data.len() as f64 * 8.0 / end_time.as_secs_f64()) / 1_000_000.0
     );
-
     encrypted
 }
 
 fn block_decrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let block_count = data.chunks(BLOCK_SIZE).count();
     let timer = Instant::now();
     trace!("[BLOCK-DEC] Начало дешифрования блоков (данные: {}b)", data.len());
+    trace!("[BLOCK-DEC] Всего блоков: {}", block_count);
 
     if data.len() % BLOCK_SIZE != 0 {
         error!("[BLOCK-DEC] Некорректный размер данных ({} не кратно {})", data.len(), BLOCK_SIZE);
@@ -329,62 +373,56 @@ fn block_decrypt(data: &[u8], key: &[u8], iv: &[u8]) -> Result<Vec<u8>, CryptoEr
     let mut decrypted = Vec::with_capacity(data.len());
     let round_keys = expand_key(key, ROUNDS);
     trace!("[BLOCK-DEC] Ключи раундов сгенерированы");
+    let inv_sbox = &INV_S_BOX;
 
-    let mut prev_block = iv.to_vec();
-    let block_count = data.len() / BLOCK_SIZE;
-    trace!("[BLOCK-DEC] Всего блоков: {}", block_count);
+    let mut prev_block = [0u8; BLOCK_SIZE];
+    prev_block.copy_from_slice(&iv[..BLOCK_SIZE.min(iv.len())]);
 
-    for chunk in data.chunks(BLOCK_SIZE) {
-        let mut block = chunk.to_vec();
+    for chunk in data.chunks_exact(BLOCK_SIZE) {
+        let mut block = [0u8; BLOCK_SIZE];
+        block.copy_from_slice(chunk);
 
         for round_key in round_keys.iter().rev() {
-            if !block.is_empty() {
-                for i in (0..block.len()).rev() {
-                    let j = (i * 7 + 1) % block.len();
-                    block[i] ^= block[j].rotate_left(5);
-                }
-                let shift = block.len() / 3;
-                block.rotate_right(shift);
+            for i in (0..BLOCK_SIZE).rev() {
+                let j = (i * 7 + 1) % BLOCK_SIZE;
+                block[i] ^= block[j].rotate_left(5);
+            }
+            block.rotate_right(ROTATE_RIGHT_SHIFT2);
+
+            apply_sbox(&mut block, inv_sbox);
+
+            let rk_len = round_key.len();
+            for i in 0..BLOCK_SIZE {
+                block[i] ^= round_key[i % rk_len];
             }
 
-            for byte in &mut block {
-                *byte = INV_S_BOX[*byte as usize];
+            for i in (0..BLOCK_SIZE).rev() {
+                let j = (i * 11 + 3) % BLOCK_SIZE;
+                block[i] = block[i].rotate_right(3).wrapping_sub(block[j]);
             }
+            block.rotate_right(ROTATE_RIGHT_SHIFT);
 
-            for (i, byte) in block.iter_mut().enumerate() {
-                *byte ^= round_key[i % round_key.len()];
-            }
-
-            if !block.is_empty() {
-                for i in (0..block.len()).rev() {
-                    let j = (i * 11 + 3) % block.len();
-                    block[i] = block[i].rotate_right(3).wrapping_sub(block[j]);
-                }
-                let shift = block.len() / 2;
-                block.rotate_right(shift);
-            }
-
-            for byte in &mut block {
-                *byte = INV_S_BOX[*byte as usize];
-            }
+            apply_sbox(&mut block, inv_sbox);
         }
 
-        for (i, byte) in block.iter_mut().enumerate() {
-            *byte ^= prev_block[i % BLOCK_SIZE];
+        for i in 0..BLOCK_SIZE {
+            block[i] ^= prev_block[i];
         }
 
-        prev_block = chunk.to_vec();
-        decrypted.extend(block);
+        prev_block.copy_from_slice(chunk);
+        decrypted.extend_from_slice(&block);
     }
 
     remove_padding(&mut decrypted)?;
     trace!("[BLOCK-DEC] Padding удален");
 
-    debug!(
+    let end_time = timer.elapsed();
+
+    info!(
         "[BLOCK-DEC] Завершено: {} блоков за {:?} ({:.2} Мбит/сек)",
         block_count,
-        timer.elapsed(),
-        (data.len() as f64 * 8.0 / timer.elapsed().as_secs_f64()) / 1_000_000.0
+        end_time,
+        (data.len() as f64 * 8.0 / end_time.as_secs_f64()) / 1_000_000.0
     );
 
     Ok(decrypted)
