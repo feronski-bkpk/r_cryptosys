@@ -480,18 +480,22 @@ fn remove_padding(data: &mut Vec<u8>) -> Result<(), CryptoError> {
 
 pub(crate) fn generate_salt() -> Vec<u8> {
     use std::time::{SystemTime, UNIX_EPOCH};
+    use std::process;
 
-    let mut salt = vec![0u8; SALT_LENGTH];
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
 
-    for (i, byte) in salt.iter_mut().enumerate() {
-        let shift = (i * 8) % 128;
-        *byte = ((time >> shift) & 0xFF) as u8;
-    }
+    let heap_addr = Box::into_raw(Box::new(42)) as usize;
+    let pid = process::id();
 
+    let mut hasher = Sha256::new();
+    hasher.update(time.to_le_bytes());
+    hasher.update(heap_addr.to_le_bytes());
+    hasher.update(pid.to_le_bytes());
+
+    let salt = hasher.finalize()[..16].to_vec();
     trace!("[SALT] Сгенерирована соль: {:?}", salt);
     salt
 }
