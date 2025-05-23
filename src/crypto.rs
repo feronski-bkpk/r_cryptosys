@@ -1,8 +1,8 @@
 use log::{error, info, trace, warn};
-use sha2::{Sha256, Digest};
 use subtle::ConstantTimeEq;
 use std::time::{Instant, Duration};
 use crate::error::CryptoError;
+use crate::sha256;
 
 const PBKDF2_ITERATIONS: u32 = 100_000;
 const KEY_LENGTH: usize = 32;
@@ -70,7 +70,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut key_padded = vec![0; 64];
     if key.len() > 64 {
         trace!("[HMAC] Ключ слишком длинный, хешируем его");
-        let hash = Sha256::digest(key);
+        let hash = sha256(key);
         key_padded[..hash.len()].copy_from_slice(&hash);
     } else {
         key_padded[..key.len()].copy_from_slice(key);
@@ -84,16 +84,16 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
         opad[i] ^= key_padded[i];
     }
 
-    let mut inner = Sha256::new();
-    inner.update(&ipad);
-    inner.update(data);
-    let inner_result = inner.finalize();
+    let mut inner_input = Vec::new();
+    inner_input.extend(&ipad);
+    inner_input.extend(data);
+    let inner_result = sha256(&inner_input);
 
-    let mut outer = Sha256::new();
-    outer.update(&opad);
-    outer.update(&inner_result);
+    let mut outer_input = Vec::new();
+    outer_input.extend(&opad);
+    outer_input.extend(&inner_result);
+    let result = sha256(&outer_input).to_vec();
 
-    let result = outer.finalize().to_vec();
     result
 }
 
@@ -490,12 +490,13 @@ pub(crate) fn generate_salt() -> Vec<u8> {
     let heap_addr = Box::into_raw(Box::new(42)) as usize;
     let pid = process::id();
 
-    let mut hasher = Sha256::new();
-    hasher.update(time.to_le_bytes());
-    hasher.update(heap_addr.to_le_bytes());
-    hasher.update(pid.to_le_bytes());
+    let mut input = Vec::new();
+    input.extend(time.to_le_bytes());
+    input.extend(heap_addr.to_le_bytes());
+    input.extend(pid.to_le_bytes());
 
-    let salt = hasher.finalize()[..16].to_vec();
+    let hash = sha256(&input);
+    let salt = hash[..16].to_vec();
     trace!("[SALT] Сгенерирована соль: {:?}", salt);
     salt
 }

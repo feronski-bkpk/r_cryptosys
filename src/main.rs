@@ -1,4 +1,5 @@
 mod crypto;
+mod sha256;
 mod error;
 mod files;
 mod ui;
@@ -15,6 +16,7 @@ use crate::ui::*;
 use crate::crypto::{encrypt, decrypt};
 use crate::logger::{CryptoLogger};
 use crate::password::read_password;
+pub use sha256::sha256;
 
 const SOURCE_DIR: &str = "source_files";
 const ENCRYPTED_DIR: &str = "encrypted";
