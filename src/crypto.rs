@@ -10,7 +10,7 @@ const SALT_LENGTH: usize = 16;
 const HASH_LENGTH: usize = 32;
 const BLOCK_SIZE: usize = 16;
 const IV_LENGTH: usize = 16;
-const ROUNDS: usize = 1;
+const ROUNDS: usize = 10;
 
 static SUBSTITUTION_BOX: [u8; 256] = [
     0x63, 0x7C, 0x77, 0x7B, 0xF2, 0x6B, 0x6F, 0xC5, 0x30, 0x01, 0x67, 0x2B, 0xFE, 0xD7, 0xAB, 0x76,
@@ -142,21 +142,29 @@ pub fn encrypt(data: &[u8], password: &str, original_extension: Option<&str>) ->
     info!("[ENC] Начало шифрования (данные: {}b)", data.len());
     trace!("[ENC] Расширение файла: {:?}", original_extension);
 
+    println!("Генерация соли и iv...");
     let salt = generate_salt();
     trace!("[ENC] Соль: {:?}", salt);
 
     let iv = generate_salt()[..IV_LENGTH].to_vec();
     trace!("[ENC] Вектор инициализации: {:?}", iv);
 
+    println!("Генерация ключа...");
     let key = derive_key(password, &salt);
 
+    println!("Шифрование блоков...");
     let encrypted = block_encrypt(data, &key, &iv);
     info!("[ENC] Данные зашифрованы ({} блоков)", encrypted.len() / BLOCK_SIZE);
 
+    let data_hash = sha256(data);
+    trace!("[ENC] Хеш данных: {:?}", data_hash);
+
+    println!("Формирование данных...");
     let mut hmac_data = Vec::new();
     hmac_data.extend(&salt);
     hmac_data.extend(&iv);
     hmac_data.extend(&encrypted);
+    hmac_data.extend(&data_hash);
     let hmac = hmac_sha256(&key, &hmac_data);
     trace!("[ENC] HMAC вычислен");
 
@@ -164,10 +172,13 @@ pub fn encrypt(data: &[u8], password: &str, original_extension: Option<&str>) ->
     let ext_len = ext_bytes.len() as u8;
     trace!("[ENC] Длина расширения: {}", ext_len);
 
-    let mut result = Vec::with_capacity(SALT_LENGTH + IV_LENGTH + HASH_LENGTH + 1 + ext_bytes.len() + encrypted.len());
+    let mut result = Vec::with_capacity(
+        SALT_LENGTH + IV_LENGTH + HASH_LENGTH + HASH_LENGTH + 1 + ext_bytes.len() + encrypted.len()
+    );
     result.extend(&salt);
     result.extend(&iv);
     result.extend(&hmac);
+    result.extend(&data_hash);
     result.push(ext_len);
     result.extend(ext_bytes);
     result.extend(&encrypted);
@@ -185,12 +196,14 @@ pub fn decrypt(data: &[u8], password: &str) -> Result<(Vec<u8>, Option<String>, 
     let timer = Instant::now();
     info!("[DEC] Начало дешифрования (данные: {}b)", data.len());
 
-    let min_size = SALT_LENGTH + IV_LENGTH + HASH_LENGTH + 1;
+    println!("Проверка данных...");
+    let min_size = SALT_LENGTH + IV_LENGTH + HASH_LENGTH + HASH_LENGTH + 1;
     if data.len() < min_size {
         error!("[DEC] Недостаточный размер данных ({} < {})", data.len(), min_size);
         return Err(CryptoError::InvalidData);
     }
 
+    println!("Генерация соли  и iv");
     let salt = &data[..SALT_LENGTH];
     trace!("[DEC] Соль: {:?}", salt);
 
@@ -198,8 +211,9 @@ pub fn decrypt(data: &[u8], password: &str) -> Result<(Vec<u8>, Option<String>, 
     trace!("[DEC] Вектор инициализации: {:?}", iv);
 
     let stored_hmac = &data[SALT_LENGTH + IV_LENGTH..SALT_LENGTH + IV_LENGTH + HASH_LENGTH];
-    let ext_len = data[SALT_LENGTH + IV_LENGTH + HASH_LENGTH] as usize;
-    let ext_start = SALT_LENGTH + IV_LENGTH + HASH_LENGTH + 1;
+    let stored_hash = &data[SALT_LENGTH + IV_LENGTH + HASH_LENGTH..SALT_LENGTH + IV_LENGTH + HASH_LENGTH * 2];
+    let ext_len = data[SALT_LENGTH + IV_LENGTH + HASH_LENGTH * 2] as usize;
+    let ext_start = SALT_LENGTH + IV_LENGTH + HASH_LENGTH * 2 + 1;
     let ext_end = ext_start + ext_len;
     let encrypted = &data[ext_end..];
 
@@ -210,10 +224,12 @@ pub fn decrypt(data: &[u8], password: &str) -> Result<(Vec<u8>, Option<String>, 
 
     trace!("[DEC] Длина расширения: {}", ext_len);
 
+    println!("Сопоставление подписей...");
     let mut hmac_data = Vec::new();
     hmac_data.extend(salt);
     hmac_data.extend(iv);
     hmac_data.extend(encrypted);
+    hmac_data.extend(stored_hash);
 
     let key = derive_key(password, salt);
     let computed_hmac = hmac_sha256(&key, &hmac_data);
@@ -224,8 +240,17 @@ pub fn decrypt(data: &[u8], password: &str) -> Result<(Vec<u8>, Option<String>, 
     }
     trace!("[DEC] HMAC проверен успешно");
 
+    println!("Дешифрование блоков...");
     let decrypted = block_decrypt(encrypted, &key, iv)?;
     info!("[DEC] Данные расшифрованы ({} блоков)", decrypted.len() / BLOCK_SIZE);
+
+    println!("Окончательные проверки...");
+    let computed_hash = sha256(&decrypted);
+    if computed_hash.ct_ne(stored_hash).unwrap_u8() == 1 {
+        error!("[DEC] Ошибка целостности данных (хеш не совпадает)");
+        return Err(CryptoError::AuthFailed);
+    }
+    trace!("[DEC] Хеш данных проверен успешно");
 
     let original_extension = if ext_len > 0 {
         let ext = String::from_utf8(data[ext_start..ext_end].to_vec())?;
