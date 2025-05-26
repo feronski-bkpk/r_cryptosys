@@ -486,7 +486,7 @@ fn expand_key(key: &[u8], rounds: usize) -> Vec<Vec<u8>> {
 }
 
 fn remove_padding(data: &mut Vec<u8>) -> Result<(), CryptoError> {
-    let pad_len = *data.last().ok_or({error!("[PAD] Пустые данные");CryptoError::AuthFailed})? as usize;
+    let pad_len = *data.last().ok_or({error!("[PAD] Пустые данные");CryptoError::AuthFailed})? as usize; // некорректно обрабатывает ошибку, заметил не сразу =/
     trace!("[PAD] Длина padding: {}", pad_len);
 
     if pad_len == 0 || pad_len > BLOCK_SIZE || data.len() < pad_len {
